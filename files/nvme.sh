@@ -9,11 +9,11 @@ cp /etc/fstab /etc/fstab.bak
 sudo apt-get install nvme-cli
 
 #Get 999-aws-ebs-nvme.rules file
-wget 
+wget https://github.com/iamgagantyagi/AWS_EC2_Right_Size/blob/main/ebs-nvme-files/999-aws-ebs-nvme.rules
 sudo cp -v 999-aws-ebs-nvme.rules /etc/udev/rules.d/
 
 #Get ebs-nvme-mapping.sh file
-wget 
+wget https://github.com/iamgagantyagi/AWS_EC2_Right_Size/blob/main/ebs-nvme-files/ebs-nvme-mapping.sh
 sudo cp ebs-nvme-mapping.sh /usr/local/sbin/
 chmod 755 /usr/local/sbin/ebs-nvme-mapping.sh
 
