@@ -1,0 +1,121 @@
+---
+- hosts: aws_usw2_prod
+  serial: 1
+  any_errors_fatal: true
+  gather_facts: false
+    
+  vars:
+    region: us-west-2
+    instance_name: "{{ inventory_hostname }}"
+   
+  vars_files:
+          - credentials.yml
+
+  tasks:
+  - name: Get Instance ID
+    delegate_to: localhost
+    connection: local
+    command: aws ec2 describe-instances --region {{ region }} --filters "Name=tag:Name,Values={{ inventory_hostname }}" --query "Reservations[].Instances[].InstanceId" --output text
+    register: instance_id
+
+  - name: Get Volume IDs
+    delegate_to: localhost
+    connection: local
+    ec2_instance_info:
+      instance_ids: "{{ instance_id.stdout }}"
+      region: "{{ region }}"
+    register: instance_info
+
+  - name: Execute the command
+    become: yes
+    become_method: sudo
+    shell: apt-get install -y linux-aws
+    when: instance_info.instances[0].instance_type is search('^t2\\..*')
+
+  - name: nvme script
+    become: yes
+    become_method: sudo
+    copy: src=files/nvme.sh dest=/tmp/ mode=0755
+    #ignore_errors: true
+    when: not instance_info.instances[0].instance_type is search('^(t3|m5|c5|r5)\\..*')
+
+  - name: Execute the nvme script
+    # ignore_errors: true
+    become: yes
+    become_method: sudo
+    command: sh /tmp/nvme.sh
+    when: not instance_info.instances[0].instance_type is search('^(t3|m5|c5|r5)\\..*')
+
+  - name: Create Snapshots
+    delegate_to: localhost
+    connection: local
+    ec2_snapshot:
+      volume_id: "{{ item.ebs.volume_id }}"
+      description: "{{ instance_name }}"
+      region: "{{ region }}"
+    loop: "{{ instance_info.instances[0].block_device_mappings }}"
+    loop_control:
+        loop_var: item
+    register: snapshot_ids
+
+  - name: Verify Status of snapshot
+    delegate_to: localhost
+    connection: local
+    ec2_snapshot_info:
+      filters:
+       description: "{{ instance_name }}"
+      region: "{{ region }}"
+    register: snapshot_status
+    until: snapshot_status.snapshots[0].state == 'completed'
+    retries: 10
+    delay: 10
+  
+  - name: Stop the ec2 instance
+    delegate_to: localhost
+    connection: local
+    command: aws ec2 stop-instances --instance-ids '{{ instance_id.stdout }}' --region {{ region }}
+    when: snapshot_status.snapshots[0].state == 'completed'
+
+  - name: Get Instance status
+    delegate_to: localhost
+    connection: local
+    command: aws ec2 describe-instances --region {{ region }} --filters 'Name=tag:Name,Values= {{ instance_name }}' --query 'Reservations[*].Instances[*].State.Name' --output text
+    register: Instance_status
+    ignore_errors: true
+    until: Instance_status.stdout == "stopped"
+    retries: 10
+    delay: 20
+
+  - name: Change Instance Type
+    delegate_to: localhost
+    connection: local
+    command: aws ec2 modify-instance-attribute --instance-id '{{ instance_id.stdout }}' --instance-type '{{ new_instance_type }}' --region '{{ region }}'
+    when: Instance_status.stdout == "stopped"
+
+  - name: Start ec2 Instance
+    delegate_to: localhost
+    connection: local
+    ignore_errors: yes
+    shell: aws ec2 start-instances --instance-ids '{{ instance_id.stdout }}' --region '{{ region }}'
+
+  - name: Wait 180 seconds, but only start checking after 30 seconds
+    connection: local
+    wait_for_connection:
+     delay: 30
+     timeout: 180
+
+  - name: Verify instance type changed or not
+    delegate_to: localhost
+    connection: local
+    shell: aws ec2 describe-instances --instance-ids {{ instance_id.stdout }} --region {{ region }} --query "Reservations[].Instances[].InstanceType" --output text
+    register: instance_type_status
+   
+  - name: Delete Snapshots
+    delegate_to: localhost
+    connection: local
+    ec2_snapshot:
+      snapshot_id: "{{ item.snapshot_id }}"
+      region: us-west-2
+      state: absent
+    loop: "{{ snapshot_status.snapshots }}"
+    when: instance_type_status.stdout == new_instance_type
